@@ -111,8 +111,8 @@ class AnalysisJob(Base):
     status = Column(String, default="pending", index=True, nullable=False)
     
     # Timestamps
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=datetime.now(), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default = datetime.now(), server_default=func.now(), onupdate=func.now(), nullable=False)
     
     # Input data
     original_image_url = Column(String, nullable=True)

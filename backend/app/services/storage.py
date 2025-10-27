@@ -166,3 +166,31 @@ class StorageService:
             logger.error(f"Error deleting file from UploadThing: {e}")
             return False
 
+    def download_file(self, file_url: str) -> bytes:
+        """
+        Download a file from UploadThing URL.
+
+        Args:
+            file_url: The URL of the file to download
+
+        Returns:
+            File content as bytes
+
+        Raises:
+            Exception if download fails
+        """
+        try:
+            with httpx.Client() as client:
+                response = client.get(file_url, timeout=60.0)
+                
+                if response.status_code == 200:
+                    logger.info(f"Successfully downloaded file from: {file_url}")
+                    return response.content
+                else:
+                    logger.error(f"Failed to download file: {response.status_code} - {response.text}")
+                    raise Exception(f"Download failed: {response.status_code}")
+
+        except Exception as e:
+            logger.error(f"Error downloading file from {file_url}: {e}")
+            raise Exception(f"Storage download failed: {str(e)}")
+

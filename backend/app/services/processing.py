@@ -120,7 +120,7 @@ def run_full_analysis(job_id: str, image_bytes: bytes, app_state: Any):
             "generation_prompt": generation_prompt
         }
         
-        # Step 10: Update database with results
+        # Step 10: Update database with results (using existing schema)
         job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
         if job:
             job.status = "completed"

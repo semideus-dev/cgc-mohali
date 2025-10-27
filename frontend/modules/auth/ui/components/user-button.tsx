@@ -10,7 +10,7 @@ export default function UserButton() {
   const { data: session, isPending: isLoading } = authClient.useSession();
 
   if (isLoading) {
-    return <Skeleton className="h-10 w-10 rounded-full" />;
+    return <Skeleton className="h-10 w-10 rounded-full bg-zinc-400" />;
   }
 
   return session == null ? (
@@ -22,7 +22,7 @@ export default function UserButton() {
   ) : (
     <Link href="/profile" className="p-0 m-0">
       <Avatar>
-        <AvatarFallback className="bg-white text-black">
+        <AvatarFallback className="bg-black text-primary">
           {session.user.name
             .split(" ")
             .map((n) => n[0])

@@ -1,6 +1,11 @@
 """Application configuration using Pydantic settings"""
 
+import os
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 class Settings(BaseSettings):
@@ -9,11 +14,9 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str
     
-    # S3-Compatible Storage
-    STORAGE_ENDPOINT_URL: str
-    STORAGE_ACCESS_KEY_ID: str
-    STORAGE_SECRET_ACCESS_KEY: str
-    STORAGE_BUCKET_NAME: str
+    # UploadThing Storage
+    UPLOADTHING_SECRET: str
+    UPLOADTHING_APP_ID: str
     
     # API Configuration
     API_V1_STR: str = "/api/v1"

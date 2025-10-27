@@ -7,7 +7,6 @@ requires-python = ">=3.13"
 dependencies = [
     "accelerate>=1.11.0",
     "alembic>=1.17.0",
-    "boto3>=1.40.59",
     "diffusers>=0.35.2",
     "easyocr>=1.7.2",
     "fastapi>=0.120.0",

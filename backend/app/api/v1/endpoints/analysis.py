@@ -3,19 +3,27 @@
 import uuid
 import logging
 from typing import Annotated
-
+import httpx
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, BackgroundTasks, Request
 from sqlalchemy.orm import Session
-
+from dotenv import load_dotenv
 from app.db.database import get_db
 from app.db.models import AnalysisJob
 from app.db.schemas import AnalysisJobCreateResponse, AnalysisJobStatusResponse
+from torchvision import models, transforms
+import torch
 from app.services.storage import StorageService
 from app.services.processing import run_full_analysis
+import os
+import pytesseract
+from io import BytesIO
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+load_dotenv()
+
 
 
 @router.post("/analyze", status_code=202, response_model=AnalysisJobCreateResponse)
@@ -140,3 +148,67 @@ async def get_analysis_results(
             detail=f"Failed to retrieve job: {str(e)}"
         )
 
+
+@router.post("/generate-image")
+async def generate_image(prompt : str):
+    generated_ad = httpx.get(f'https://image.pollinations.ai/prompt/{prompt}')
+    res = httpx.post(
+        "https://uploadthing.com/api/uploadFiles",
+        headers={
+            "x-uploadthing-api-key": os.getenv("UPLOADTHING_SECRET"),
+            "Content-Type": "application/json"
+        },
+        json={
+            "files": [
+                {
+                    "name": "generated.png",
+                    "size": len(generated_ad.content),
+                    "type": "image/png"
+                }
+            ],
+            "appId": os.getenv("UPLOADTHING_APP_ID")
+        }
+    )
+    upload_info = res.json()["data"][0]
+    url = upload_info["url"]
+    fields = upload_info["fields"]
+    file_url = upload_info["fileUrl"]
+    multipart_data = {**fields, "file": ("generated.png", generated_ad.content, "image/png")}
+    httpx.post(url, files=multipart_data)
+
+    return {"imageUrl" : file_url}
+
+
+@router.post("/run-ocr")
+async def run_ocr(image_url: str):
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    image_bytes = httpx.get(image_url).content
+    image = Image.open(BytesIO(image_bytes))
+    text = pytesseract.image_to_string(image)
+    text = text.replace("httpsi//", "https://")
+    text = text.replace("httpi//", "http://")
+
+    return {"ocr_text": text.replace('\n', ' ')}
+
+@router.post("/torch-analysis")
+async def torch_analysis(image_url: str):
+    model = models.resnet50(pretrained=True)
+    model.eval()
+    preprocess = transforms.Compose([
+    transforms.Resize(256),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])
+])
+    resp = httpx.post(image_url)
+    image = Image.open(BytesIO(resp.content)).convert("RGB")
+    tensor = preprocess(image).unsqueeze(0)
+    with torch.no_grad():
+        outputs = model(tensor)
+        probs = torch.nn.functional.softmax(outputs[0], dim=0)
+
+    # Get top prediction
+    top_prob, top_idx = torch.topk(probs, 1)
+    from torchvision.models import ResNet50_Weights
+    labels = ResNet50_Weights.IMAGENET1K_V1.meta["categories"]
+    return {"label": labels[top_idx.item()], "confidence": float(top_prob.item()), "probs" : probs}

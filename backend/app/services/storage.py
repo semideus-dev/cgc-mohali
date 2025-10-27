@@ -18,7 +18,8 @@ class StorageService:
         """Initialize the UploadThing client with credentials from settings"""
         self.secret = settings.UPLOADTHING_SECRET
         self.app_id = settings.UPLOADTHING_APP_ID
-        self.base_url = "https://uploadthing.com/api"
+        # UploadThing API base URL
+        self.base_url = "https://uploadthing.com"
     
     def upload_file(
         self,
@@ -44,39 +45,79 @@ class StorageService:
             # Generate a unique filename with timestamp
             timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
             unique_file_name = f"{timestamp}_{file_name}"
+            file_size = len(file_bytes)
             
-            # Prepare headers
+            # Step 1: Request presigned URL from UploadThing
             headers = {
-                "X-Uploadthing-Api-Key": self.secret,
-                "X-Uploadthing-Version": "6.4.0"
+                "Content-Type": "application/json",
+                "x-uploadthing-api-key": self.secret
             }
             
-            # Prepare the file for upload
-            files = {
-                "files": (unique_file_name, io.BytesIO(file_bytes), content_type)
+            # Prepare request payload for presigned URL
+            payload = {
+                "files": [
+                    {
+                        "name": unique_file_name,
+                        "size": file_size,
+                        "type": content_type
+                    }
+                ],
+                "appId": self.app_id
             }
             
-            # Upload to UploadThing
             with httpx.Client() as client:
+                # Get presigned URL
+                logger.info(f"Requesting presigned URL for file: {unique_file_name}")
                 response = client.post(
                     f"{self.base_url}/api/uploadFiles",
                     headers=headers,
-                    files=files,
-                    timeout=60.0
+                    json=payload,
+                    timeout=30.0
                 )
                 
                 if response.status_code != 200:
-                    raise Exception(f"UploadThing API error: {response.status_code} - {response.text}")
+                    logger.error(f"Presigned URL request failed: {response.status_code} - {response.text}")
+                    raise Exception(f"UploadThing presigned URL error: {response.status_code} - {response.text}")
                 
-                result = response.json()
+                presigned_data = response.json()
+                logger.info(f"Received presigned URL response: {presigned_data}")
                 
-                # Extract the file URL from response
-                if "data" in result and len(result["data"]) > 0:
-                    file_url = result["data"][0]["url"]
-                    logger.info(f"Successfully uploaded file: {unique_file_name}")
-                    return file_url
-                else:
-                    raise Exception("No file URL returned from UploadThing")
+                # Extract presigned URL and fields
+                if not presigned_data or "data" not in presigned_data or len(presigned_data["data"]) == 0:
+                    raise Exception("No presigned URL data returned from UploadThing")
+                
+                upload_data = presigned_data["data"][0]
+                presigned_url = upload_data.get("url")
+                fields = upload_data.get("fields", {})
+                file_url = upload_data.get("fileUrl")
+                
+                if not presigned_url:
+                    raise Exception("No presigned URL in response")
+                
+                # Step 2: Upload file to presigned URL
+                logger.info(f"Uploading file to presigned URL: {presigned_url}")
+                
+                # Prepare multipart form data for S3-compatible upload
+                multipart_data = {
+                    **fields,  # Include all required fields from presigned URL
+                    "file": (unique_file_name, io.BytesIO(file_bytes), content_type)
+                }
+                
+                upload_response = client.post(
+                    presigned_url,
+                    files=multipart_data,
+                    timeout=60.0
+                )
+                
+                if upload_response.status_code not in [200, 201, 204]:
+                    logger.error(f"File upload failed: {upload_response.status_code} - {upload_response.text}")
+                    raise Exception(f"File upload failed: {upload_response.status_code}")
+                
+                # Use the fileUrl from the response
+                public_url = file_url
+                
+                logger.info(f"Successfully uploaded file: {unique_file_name} -> {public_url}")
+                return public_url
             
         except Exception as e:
             logger.error(f"Failed to upload file to UploadThing: {e}")
@@ -102,8 +143,8 @@ class StorageService:
                 return False
             
             headers = {
-                "X-Uploadthing-Api-Key": self.secret,
-                "X-Uploadthing-Version": "6.4.0"
+                "x-uploadthing-api-key": self.secret,
+                "Content-Type": "application/json"
             }
             
             with httpx.Client() as client:

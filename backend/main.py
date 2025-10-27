@@ -1,7 +1,10 @@
-from fastapi import FastAPI
+"""
+AdVision Backend Entry Point
 
-app = FastAPI()
+This file serves as the entry point for the application.
+The actual FastAPI app is defined in app/main.py
+"""
 
-@app.get("/")
-def read_root():
-    return {"message": "Hello, World!"}
+from app.main import app
+
+__all__ = ["app"]

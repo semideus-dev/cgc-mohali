@@ -137,3 +137,14 @@ class AnalysisJob(Base):
     def __repr__(self):
         return f"<AnalysisJob(id={self.id}, status={self.status}, user_id={self.user_id})>"
 
+
+
+class MoodBoard(Base):
+    __tablename__ = "moodboard"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=True)
+    brand_name = Column(Text, nullable=True)
+    color_palatte = Column(JSONB, nullable=True)
+    brand_slogan = Column(Text, nullable=True)
+    description = Column(Text, nullable=True)

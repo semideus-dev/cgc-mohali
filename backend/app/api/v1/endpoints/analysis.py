@@ -19,7 +19,11 @@ from app.db.database import get_db
 from app.db.models import AnalysisJob, Canvas
 from app.db.schemas import AnalysisJobCreateResponse, AnalysisJobStatusResponse
 from app.services.storage import StorageService
-from app.services.processing import run_full_analysis
+from app.core.config import settings
+from app.services.ai_text import extract_text, analyze_comprehensive_text
+from app.services.ai_vision import analyze_objects, analyze_colors
+from app.services.ai_critique import generate_comprehensive_critique, generate_master_prompt
+from app.services.ai_generator import generate_image_with_diffusers
 
 logger = logging.getLogger(__name__)
 
@@ -106,24 +110,76 @@ async def create_analysis(
         )
 
 
-@router.get("/results/{job_id}", response_model=AnalysisJobStatusResponse)
-async def get_analysis_results(
+# @router.post("/generate/{job_id}", status_code=200, response_model=GenerationResponse)
+# async def generate_enhanced_image(
+#     job_id: uuid.UUID,
+#     request: Request,
+#     background_tasks: BackgroundTasks,
+#     db: Session = Depends(get_db)
+# ):
+#     """
+#     Step 4: Generate enhanced image using master prompt.
+    
+#     Uses Stable Diffusion with the master prompt to create
+#     an enhanced version of the original advertisement.
+#     """
+#     try:
+#         # Get job from database
+#         job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
+#         if not job:
+#             raise HTTPException(status_code=404, detail="Analysis job not found")
+        
+#         if job.status != "critiqued":
+#             raise HTTPException(
+#                 status_code=400,
+#                 detail=f"Job status is '{job.status}', expected 'critiqued'"
+#             )
+        
+#         if not job.master_prompt:
+#             raise HTTPException(
+#                 status_code=400,
+#                 detail="Master prompt not available. Run /critique first."
+#             )
+        
+#         # Update status
+#         job.status = "generating"
+#         db.commit()
+        
+#         # Add background task for image generation
+#         background_tasks.add_task(
+#             run_generation_pipeline,
+#             job_id=str(job_id),
+#             app_state=request.app.state,
+#             db_session_factory=db.get_bind
+#         )
+        
+#         return GenerationResponse(
+#             job_id=job_id,
+#             status="generating",
+#             generated_image_url=None,
+#             master_prompt=job.master_prompt
+#         )
+        
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         logger.error(f"Error starting generation for job {job_id}: {e}", exc_info=True)
+#         raise HTTPException(
+#             status_code=500,
+#             detail=f"Failed to start generation: {str(e)}"
+#         )
+
+
+@router.get("/status/{job_id}", response_model=AnalysisJobStatusResponse)
+async def get_job_status(
     job_id: uuid.UUID,
     db: Session = Depends(get_db)
 ):
     """
-    Get the status and results of an analysis job.
+    Get comprehensive status and results of an analysis job.
     
-    Args:
-        job_id: UUID of the analysis job
-        
-    Returns:
-        Job status and results (if completed)
-        
-    Status values:
-    - "processing": Analysis is still running
-    - "completed": Analysis finished successfully, results available
-    - "failed": Analysis failed, error details in results
+    Returns complete job information including all analysis results,
+    critique, and generated images if available.
     """
     try:
         # Query the job from database
@@ -148,35 +204,138 @@ async def get_analysis_results(
             detail=f"Failed to retrieve job: {str(e)}"
         )
 
-@router.post("/generate-image")
-async def generate_image(prompt : str):
-    generated_ad = httpx.get(f'https://image.pollinations.ai/prompt/{prompt}')
-    res = httpx.post(
-        "https://uploadthing.com/api/uploadFiles",
-        headers={
-            "x-uploadthing-api-key": os.getenv("UPLOADTHING_SECRET"),
-            "Content-Type": "application/json"
-        },
-        json={
-            "files": [
-                {
-                    "name": "generated.png",
-                    "size": len(generated_ad.content),
-                    "type": "image/png"
+
+@router.post("/generate-image/{job_id}", status_code=200, response_model=GenerationResponse)
+async def generate_image(
+    job_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """
+    Step 4: Generate image using pollinations.ai API.
+    
+    Uses pollinations.ai API with the master prompt to create
+    an enhanced version of the original advertisement.
+    """
+    try:
+        # Get job from database
+        job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Analysis job not found")
+        
+        if job.status != "critiqued":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Job status is '{job.status}', expected 'critiqued'"
+            )
+        
+        if not job.master_prompt:
+            raise HTTPException(
+                status_code=400,
+                detail="Master prompt not available. Run /critique first."
+            )
+        
+        # Update status to generating
+        job.status = "generating"
+        db.commit()
+        
+        logger.info(f"Starting image generation for job {job_id} with prompt: {job.master_prompt}")
+        
+        # Generate image using pollinations.ai (async)
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            # Generate image from pollinations.ai
+            generated_response = await client.get(
+                f'https://image.pollinations.ai/prompt/{job.master_prompt}'
+            )
+            
+            if generated_response.status_code != 200:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to generate image from pollinations.ai: {generated_response.status_code}"
+                )
+            
+            generated_image_bytes = generated_response.content
+            logger.info(f"Generated image size: {len(generated_image_bytes)} bytes")
+            
+            # Upload generated image to UploadThing
+            # Step 1: Get presigned URL
+            presigned_response = await client.post(
+                "https://uploadthing.com/api/uploadFiles",
+                headers={
+                    "x-uploadthing-api-key": settings.UPLOADTHING_SECRET,
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "files": [
+                        {
+                            "name": f"generated_{job_id}.png",
+                            "size": len(generated_image_bytes),
+                            "type": "image/png"
+                        }
+                    ],
+                    "appId": settings.UPLOADTHING_APP_ID
                 }
-            ],
-            "appId": os.getenv("UPLOADTHING_APP_ID")
-        }
-    )
-    upload_info = res.json()["data"][0]
-    url = upload_info["url"]
-    fields = upload_info["fields"]
-    file_url = upload_info["fileUrl"]
-    multipart_data = {**fields, "file": ("generated.png", generated_ad.content, "image/png")}
-    httpx.post(url, files=multipart_data)
+            )
+            
+            if presigned_response.status_code != 200:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to get presigned URL: {presigned_response.status_code}"
+                )
+            
+            upload_info = presigned_response.json()["data"][0]
+            presigned_url = upload_info["url"]
+            fields = upload_info["fields"]
+            file_url = upload_info["fileUrl"]
+            
+            # Step 2: Upload to presigned URL
+            multipart_data = {
+                **fields,
+                "file": (f"generated_{job_id}.png", generated_image_bytes, "image/png")
+            }
+            
+            upload_response = await client.post(presigned_url, files=multipart_data)
+            
+            if upload_response.status_code not in [200, 201, 204]:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to upload to UploadThing: {upload_response.status_code}"
+                )
+            
+            logger.info(f"Successfully uploaded generated image to: {file_url}")
+        
+        # Update job with generated image
+        job.generated_image_url = file_url
+        job.status = "completed"
+        db.commit()
+        
+        logger.info(f"Image generation completed for job {job_id}")
+        
+        return GenerationResponse(
+            job_id=job_id,
+            status="completed",
+            generated_image_url=file_url,
+            master_prompt=job.master_prompt
+        )
 
-    return {"imageUrl" : file_url}
-
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating image for job {job_id}: {e}", exc_info=True)
+        
+        # Update job status to failed
+        try:
+            job = db.query(AnalysisJob).filter(AnalysisJob.id == job_id).first()
+            if job:
+                job.status = "failed"
+                db.commit()
+        except Exception as db_error:
+            logger.error(f"Failed to update job status: {db_error}")
+        
+        raise HTTPException(
+            status_code=500,
+            detail=f"Image generation failed: {str(e)}"
+        )
 
 @router.post("/run-ocr")
 async def run_ocr(image_url: str):

@@ -28,6 +28,7 @@ class User(Base):
     accounts = relationship("Account", back_populates="user", cascade="all, delete-orphan")
     canvases = relationship("Canvas", back_populates="user", cascade="all, delete-orphan")
     analysis_jobs = relationship("AnalysisJob", back_populates="user", cascade="all, delete-orphan")
+    moodboards = relationship("MoodBoard", back_populates="user", cascade="all, delete-orphan")
 
 
 class Session(Base):
@@ -111,7 +112,7 @@ class AnalysisJob(Base):
     status = Column(String, default="pending", index=True, nullable=False)
     
     # Timestamps
-    created_at = Column(DateTime(timezone=True), default=datetime.now(), server_default=func.now(), nullable=False)
+    created_at = Column(DateTime(timezone=True), default = datetime.now(), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), default = datetime.now(), server_default=func.now(), onupdate=func.now(), nullable=False)
     
     # Input data
@@ -140,11 +141,59 @@ class AnalysisJob(Base):
 
 
 class MoodBoard(Base):
+    """MoodBoard model for storing brand inspiration with images and prompts"""
+    
     __tablename__ = "moodboard"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=True)
-    brand_name = Column(Text, nullable=True)
-    color_palatte = Column(JSONB, nullable=True)
+    user_id = Column(Text, ForeignKey("user.id", ondelete="CASCADE"), nullable=False)
+    
+    # Brand information
+    brand_name = Column(Text, nullable=False)
     brand_slogan = Column(Text, nullable=True)
     description = Column(Text, nullable=True)
+    color_palette = Column(JSONB, nullable=True)  # Array of color codes: ["#FF5733", "#33FF57"]
+    
+    # Images array and single prompt
+    # images: Array of image URLs: ["https://...", "https://...", ...]
+    images = Column(JSONB, nullable=True)  # Array of image URLs
+    prompt = Column(Text, nullable=True)  # Single prompt for all images
+    
+    # Metadata
+    created_at = Column(DateTime(timezone=True), default = datetime.now(), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default = datetime.now(), server_default=func.now(), onupdate=func.now(), nullable=False)
+    
+    # Relationships
+    user = relationship("User", back_populates="moodboards")
+    moodboard_canvases = relationship("MoodBoardCanvas", back_populates="moodboard", cascade="all, delete-orphan")
+    
+    def __repr__(self):
+        return f"<MoodBoard(id={self.id}, brand_name='{self.brand_name}', user_id={self.user_id})>"
+
+
+class MoodBoardCanvas(Base):
+    """MoodBoardCanvas model for storing generated canvas designs from moodboard"""
+    
+    __tablename__ = "moodboard_canvas"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    moodboard_id = Column(UUID(as_uuid=True), ForeignKey("moodboard.id", ondelete="CASCADE"), nullable=False)
+    
+    # Canvas information
+    name = Column(Text, nullable=False, default="Untitled Canvas")
+    canvas_urls = Column(JSONB, nullable=False)  # Array of generated canvas URLs in same order as moodboard images
+    prompt = Column(Text, nullable=False)  # The prompt used to generate these canvases
+    
+    # Additional metadata
+    is_favorite = Column(Boolean, default=False, nullable=False)
+    generation_params = Column(JSONB, nullable=True)  # Store any generation parameters used
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), default = datetime.now(), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default = datetime.now(), server_default=func.now(), onupdate=func.now(), nullable=False)
+    
+    # Relationships
+    moodboard = relationship("MoodBoard", back_populates="moodboard_canvases")
+    
+    def __repr__(self):
+        return f"<MoodBoardCanvas(id={self.id}, name='{self.name}', moodboard_id={self.moodboard_id})>"

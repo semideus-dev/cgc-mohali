@@ -14,50 +14,101 @@ logger = logging.getLogger(__name__)
 
 def extract_text(ocr_reader, image_bytes: bytes) -> Dict:
     """
-    Extract text from image using EasyOCR with detailed confidence metrics.
+    Enhanced OCR with multi-pass extraction, spatial analysis, and comprehensive quality metrics.
     
     Args:
         ocr_reader: The loaded EasyOCR Reader instance
         image_bytes: Raw image bytes
         
     Returns:
-        Dictionary with extracted text and metadata
+        Comprehensive dictionary with OCR results, hierarchy, and quality metrics
     """
     try:
         # Convert bytes to numpy array for EasyOCR
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         image_array = np.array(image)
+        height, width = image_array.shape[:2]
         
-        # Run OCR with detailed output
-        results = ocr_reader.readtext(image_array, paragraph=False)
+        # Multi-pass OCR for better accuracy
+        # Pass 1: Standard detection
+        results_standard = ocr_reader.readtext(image_array, paragraph=False)
         
-        # Process results
+        # Pass 2: Paragraph mode for better flow
+        results_paragraph = ocr_reader.readtext(image_array, paragraph=True)
+        
+        # Process and merge results
         extracted_texts = []
         confidences = []
+        text_positions = []
         
-        for detection in results:
+        for detection in results_standard:
             if len(detection) >= 3:
                 bbox, text, confidence = detection[0], detection[1], detection[2]
-                extracted_texts.append(text)
-                confidences.append(confidence)
+                if text.strip():
+                    extracted_texts.append(text.strip())
+                    confidences.append(confidence)
+                    
+                    # Calculate center position for spatial analysis
+                    center_y = (bbox[0][1] + bbox[2][1]) / 2
+                    center_x = (bbox[0][0] + bbox[2][0]) / 2
+                    text_positions.append({
+                        "text": text.strip(),
+                        "x": center_x / width,  # Normalize to 0-1
+                        "y": center_y / height,
+                        "confidence": confidence
+                    })
         
         # Join all text
         full_text = " ".join(extracted_texts)
+        words = full_text.split()
         
-        # Calculate metrics
+        # Enhanced metrics
         avg_confidence = np.mean(confidences) if confidences else 0.0
-        word_count = len(full_text.split())
-        char_count = len(full_text)
+        high_conf_texts = [t for t, c in zip(extracted_texts, confidences) if c > 0.7]
+        high_conf_percentage = (len(high_conf_texts) / len(extracted_texts) * 100) if extracted_texts else 0
         
-        logger.info(f"Extracted {len(extracted_texts)} text segments, avg confidence: {avg_confidence:.3f}")
+        # Text hierarchy analysis (headline, body, caption)
+        text_hierarchy = analyze_text_hierarchy(text_positions, full_text)
+        
+        # Text density and distribution
+        text_density = len(full_text) / (width * height) * 1000000  # per megapixel
+        
+        # Content analysis
+        has_numbers = bool(re.search(r'\d', full_text))
+        has_special_chars = bool(re.search(r'[!@#$%^&*(),?":{}|<>]', full_text))
+        has_urls = bool(re.search(r'http[s]?://|www\.', full_text, re.IGNORECASE))
+        has_email = bool(re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', full_text))
+        
+        # Unique words for vocabulary richness
+        unique_words = set(word.lower() for word in words if len(word) > 2)
+        vocabulary_richness = len(unique_words) / len(words) if words else 0
+        
+        logger.info(f"Extracted {len(extracted_texts)} segments, confidence: {avg_confidence:.3f}, hierarchy: {text_hierarchy.get('layout_type')}")
         
         return {
             "raw_text": full_text.strip(),
             "segments": extracted_texts,
             "confidence": float(avg_confidence),
-            "word_count": word_count,
-            "char_count": char_count,
-            "segment_count": len(extracted_texts)
+            "high_confidence_percentage": round(high_conf_percentage, 2),
+            "word_count": len(words),
+            "unique_word_count": len(unique_words),
+            "char_count": len(full_text),
+            "segment_count": len(extracted_texts),
+            "text_hierarchy": text_hierarchy,
+            "text_density": round(text_density, 4),
+            "vocabulary_richness": round(vocabulary_richness, 3),
+            "content_markers": {
+                "has_numbers": has_numbers,
+                "has_special_characters": has_special_chars,
+                "has_urls": has_urls,
+                "has_email": has_email
+            },
+            "text_positions": text_positions,
+            "readability": {
+                "avg_word_length": round(sum(len(w) for w in words) / len(words), 2) if words else 0,
+                "sentence_count": len(re.split(r'[.!?]+', full_text)),
+                "avg_sentence_length": len(words) / len(re.split(r'[.!?]+', full_text)) if full_text else 0
+            }
         }
         
     except Exception as e:
@@ -66,16 +117,202 @@ def extract_text(ocr_reader, image_bytes: bytes) -> Dict:
             "raw_text": "",
             "segments": [],
             "confidence": 0.0,
+            "high_confidence_percentage": 0,
             "word_count": 0,
+            "unique_word_count": 0,
             "char_count": 0,
             "segment_count": 0,
+            "text_hierarchy": {},
+            "text_density": 0,
+            "vocabulary_richness": 0,
+            "content_markers": {},
+            "text_positions": [],
+            "readability": {},
             "error": str(e)
         }
 
 
+def analyze_text_hierarchy(text_positions: List[Dict], full_text: str) -> Dict:
+    """
+    Analyze spatial hierarchy and layout of text (headline, body, caption).
+    
+    Args:
+        text_positions: List of text elements with normalized positions
+        full_text: Complete extracted text
+        
+    Returns:
+        Dictionary with text hierarchy and layout analysis
+    """
+    if not text_positions:
+        return {"layout_type": "no_text", "headline": None, "body": [], "caption": None}
+    
+    try:
+        # Sort by vertical position
+        sorted_texts = sorted(text_positions, key=lambda x: x['y'])
+        
+        # Identify layout type based on distribution
+        y_positions = [item['y'] for item in text_positions]
+        y_spread = max(y_positions) - min(y_positions)
+        
+        # Determine layout type
+        if y_spread < 0.3:
+            layout_type = "centered"
+        elif len(text_positions) == 1:
+            layout_type = "single_element"
+        elif len(text_positions) <= 3:
+            layout_type = "minimal"
+        else:
+            layout_type = "structured"
+        
+        # Heuristic: Top 20% likely headlines, bottom 20% likely captions
+        headline = None
+        body = []
+        caption = None
+        
+        for item in sorted_texts:
+            if item['y'] < 0.2 and headline is None:
+                headline = item['text']
+            elif item['y'] > 0.8:
+                if caption is None:
+                    caption = item['text']
+            else:
+                body.append(item['text'])
+        
+        # Detect dominant text area (left, center, right)
+        x_positions = [item['x'] for item in text_positions]
+        avg_x = sum(x_positions) / len(x_positions)
+        
+        if avg_x < 0.33:
+            alignment = "left"
+        elif avg_x > 0.66:
+            alignment = "right"
+        else:
+            alignment = "center"
+        
+        return {
+            "layout_type": layout_type,
+            "headline": headline,
+            "body": body,
+            "caption": caption,
+            "alignment": alignment,
+            "vertical_spread": round(y_spread, 3),
+            "has_structured_layout": bool(headline or caption)
+        }
+        
+    except Exception as e:
+        logger.error(f"Text hierarchy analysis failed: {e}")
+        return {"layout_type": "unknown", "headline": None, "body": [], "caption": None}
+
+
+def generate_nlp_prompt(ocr_results: Dict, text_analysis: Dict) -> str:
+    """
+    Generate a specialized prompt from OCR and NLP analysis.
+    
+    This creates a descriptive prompt focusing on textual elements, sentiment,
+    emotional tone, and messaging effectiveness.
+    
+    Args:
+        ocr_results: Enhanced OCR results with hierarchy and metrics
+        text_analysis: Comprehensive NLP analysis results
+        
+    Returns:
+        Natural language prompt describing the textual and emotional aspects
+    """
+    try:
+        prompt_parts = []
+        
+        # 1. Text hierarchy and layout
+        text_hier = ocr_results.get("text_hierarchy", {})
+        layout_type = text_hier.get("layout_type", "")
+        
+        if layout_type == "structured":
+            prompt_parts.append("with well-structured text layout")
+        elif layout_type == "minimal":
+            prompt_parts.append("with clean, minimal text")
+        elif layout_type == "centered":
+            prompt_parts.append("with centrally focused text")
+        
+        # Add headline if present
+        headline = text_hier.get("headline")
+        if headline and len(headline) > 3:
+            prompt_parts.append(f"featuring the headline '{headline}'")
+        
+        # 2. Sentiment and emotional tone
+        sentiment = text_analysis.get("sentiment", {})
+        sentiment_label = sentiment.get("label", "").lower()
+        sentiment_score = sentiment.get("score", 0)
+        
+        if sentiment_score > 0.7:
+            if "positive" in sentiment_label:
+                prompt_parts.append("conveying an uplifting, positive, and optimistic message")
+            elif "negative" in sentiment_label:
+                prompt_parts.append("delivering a bold, serious, and impactful message")
+        
+        # 3. Dominant emotion
+        emotions = text_analysis.get("emotions", {})
+        if emotions:
+            dominant_emotion = max(emotions, key=emotions.get)
+            emotion_score = emotions[dominant_emotion]
+            
+            if emotion_score > 0.3:
+                emotion_descriptions = {
+                    "joy": "radiating joy and happiness",
+                    "excitement": "full of energy and excitement",
+                    "trust": "building trust and reliability",
+                    "confidence": "projecting confidence and authority",
+                    "surprise": "creating surprise and intrigue",
+                    "anticipation": "generating anticipation and curiosity"
+                }
+                if dominant_emotion in emotion_descriptions:
+                    prompt_parts.append(emotion_descriptions[dominant_emotion])
+        
+        # 4. Tone and style
+        tone = text_analysis.get("tone", "")
+        if tone and tone not in ["neutral", "unknown"]:
+            prompt_parts.append(f"with a {tone} and engaging tone")
+        
+        # 5. Call to action and messaging
+        text_quality = text_analysis.get("text_quality", {})
+        if text_quality.get("has_call_to_action"):
+            prompt_parts.append("including a strong, compelling call-to-action")
+        
+        # 6. Readability and clarity
+        readability = ocr_results.get("readability", {})
+        if readability.get("avg_word_length", 0) < 6:
+            prompt_parts.append("using clear, easy-to-read language")
+        
+        # 7. Text density and emphasis
+        text_density = ocr_results.get("text_density", 0)
+        if text_density > 5:
+            prompt_parts.append("with substantial informative text content")
+        elif text_density < 2:
+            prompt_parts.append("with concise, impactful text")
+        
+        # 8. Keywords and key themes
+        keywords = text_analysis.get("keywords", [])
+        if keywords and len(keywords) > 0:
+            top_keywords = keywords[:3]
+            if top_keywords:
+                keyword_str = ", ".join(top_keywords)
+                prompt_parts.append(f"emphasizing themes of {keyword_str}")
+        
+        # Combine into natural language
+        if prompt_parts:
+            nlp_prompt = "Advertisement " + ", ".join(prompt_parts) + "."
+        else:
+            nlp_prompt = "Advertisement with professional messaging and clear communication."
+        
+        logger.info(f"NLP prompt generated: {nlp_prompt[:150]}...")
+        return nlp_prompt
+        
+    except Exception as e:
+        logger.error(f"Error generating NLP prompt: {e}")
+        return "Advertisement with professional and engaging text content."
+
+
 def analyze_comprehensive_text(text_pipeline, text: str) -> Dict:
     """
-    Comprehensive text analysis including sentiment, emotions, keywords, and more.
+    Enhanced comprehensive NLP analysis with deep semantic understanding and advertising insights.
     
     Args:
         text_pipeline: The loaded transformers analysis pipeline

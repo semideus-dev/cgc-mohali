@@ -20,8 +20,8 @@ from app.db.models import AnalysisJob, Canvas
 from app.db.schemas import AnalysisJobCreateResponse, AnalysisJobStatusResponse
 from app.services.storage import StorageService
 from app.core.config import settings
-from app.services.ai_text import extract_text, analyze_comprehensive_text
-from app.services.ai_vision import analyze_objects, analyze_colors
+from app.services.ai_text import extract_text, analyze_comprehensive_text, generate_nlp_prompt
+from app.services.ai_vision import analyze_objects, analyze_colors, generate_vision_prompt
 from app.services.ai_critique import generate_comprehensive_critique, generate_master_prompt
 from app.services.ai_generator import generate_image_with_diffusers
 

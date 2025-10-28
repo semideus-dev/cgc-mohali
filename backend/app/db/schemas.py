@@ -118,6 +118,7 @@ class AnalysisJobStatusResponse(BaseModel):
 
 class MoodBoardCreate(BaseModel):
     """Request schema for creating a new moodboard"""
+    user_id: str  # User ID for the moodboard owner
     brand_name: str
     brand_slogan: Optional[str] = None
     description: Optional[str] = None

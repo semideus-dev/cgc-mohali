@@ -213,3 +213,63 @@ export const AnalysisJobStatus = {
 } as const;
 
 export type AnalysisJobStatusType = typeof AnalysisJobStatus[keyof typeof AnalysisJobStatus];
+
+// MoodBoard for brand inspiration with array of images and single prompt
+export const moodBoard = pgTable("moodboard", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  
+  // Brand information
+  brandName: text("brand_name").notNull(),
+  brandSlogan: text("brand_slogan"),
+  description: text("description"),
+  colorPalette: jsonb("color_palette").$type<string[]>(), // Array of color codes
+  
+  // Images array and single prompt
+  images: jsonb("images").$type<string[]>(), // Array of image URLs
+  prompt: text("prompt"), // Single prompt for all images
+  
+  // Timestamps
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .$defaultFn(() => new Date())
+    .notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .$defaultFn(() => new Date())
+    .notNull(),
+});
+
+// MoodBoardCanvas for storing generated canvas URLs (same order as moodboard images)
+export const moodBoardCanvas = pgTable("moodboard_canvas", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  moodboardId: uuid("moodboard_id")
+    .notNull()
+    .references(() => moodBoard.id, { onDelete: "cascade" }),
+  
+  // Canvas information
+  name: text("name").notNull().default("Untitled Canvas"),
+  canvasUrls: jsonb("canvas_urls").$type<string[]>().notNull(), // Array of canvas URLs in same order as moodboard images
+  prompt: text("prompt").notNull(),
+  
+  // Additional metadata
+  isFavorite: boolean("is_favorite")
+    .$defaultFn(() => false)
+    .notNull(),
+  generationParams: jsonb("generation_params").$type<Record<string, any>>(),
+  
+  // Timestamps
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .$defaultFn(() => new Date())
+    .notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .$defaultFn(() => new Date())
+    .notNull(),
+});
+
+// Type exports for MoodBoard
+export type MoodBoard = typeof moodBoard.$inferSelect;
+export type NewMoodBoard = typeof moodBoard.$inferInsert;
+
+export type MoodBoardCanvas = typeof moodBoardCanvas.$inferSelect;
+export type NewMoodBoardCanvas = typeof moodBoardCanvas.$inferInsert;

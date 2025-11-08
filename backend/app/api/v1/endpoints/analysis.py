@@ -600,38 +600,102 @@ Now generate the best possible descriptive ad banner prompt using the following 
 
 # ============= MoodBoard Endpoints =============
 
-@router.post("/moodboard/create", status_code=201, response_model=MoodBoardResponse)
-async def create_moodboard(
-    moodboard_data: MoodBoardCreate,
+@router.post("/moodboard/upload", status_code=201)
+async def upload_moodboard_images(
+    brand_name: Annotated[str, Form()],
+    prompt: Annotated[str, Form()],
+    images: Annotated[list[UploadFile], File(description="Upload 1-10 moodboard images")],
+    brand_slogan: Annotated[str | None, Form()] = None,
+    description: Annotated[str | None, Form()] = None,
+    color_palette: Annotated[str | None, Form(description="Comma-separated hex colors, e.g. #1E40AF,#F59E0B")] = None,
     db: Session = Depends(get_db)
 ):
     """
-    Create a new moodboard with brand information, images, and prompt.
+    Step 1: Upload moodboard images with brand information.
     
-    This endpoint creates a moodboard that can contain up to 5+ images
-    with a single prompt describing the brand vision.
+    This endpoint:
+    1. Accepts 1-10 image uploads via multipart/form-data
+    2. Uploads all images to storage in parallel
+    3. Creates a moodboard job with the uploaded image URLs
+    4. Returns moodboard_id for subsequent pipeline steps
+    
+    Color palette should be comma-separated hex codes: #1E40AF,#F59E0B,#FFFFFF
     """
     try:
-        # Create moodboard
+        # Validate images
+        if not images or len(images) == 0:
+            raise HTTPException(status_code=400, detail="At least one image is required")
+        
+        if len(images) > 10:
+            raise HTTPException(status_code=400, detail="Maximum 10 images allowed")
+        
+        logger.info(f"Creating moodboard with {len(images)} images for brand: {brand_name}")
+        
+        # Parse color palette
+        color_palette_list = None
+        if color_palette:
+            color_palette_list = [color.strip() for color in color_palette.split(",") if color.strip()]
+        
+        # Read and validate all images first
+        image_data_list = []
+        for idx, image_file in enumerate(images):
+            # Validate file type
+            if not image_file.content_type or not image_file.content_type.startswith("image/"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"File {image_file.filename} must be an image (JPEG, PNG, etc.)"
+                )
+            
+            image_bytes = await image_file.read()
+            
+            if len(image_bytes) == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Empty file uploaded: {image_file.filename}"
+                )
+            
+            filename = image_file.filename or f"moodboard_image_{idx}.jpg"
+            image_data_list.append({
+                "index": idx,
+                "bytes": image_bytes,
+                "filename": f"moodboard_{brand_name}_{idx}_{filename}",
+                "content_type": image_file.content_type
+            })
+        
+        # Upload all images in parallel
+        uploaded_urls = await upload_moodboard_images_parallel(image_data_list)
+        
+        logger.info(f"Uploaded {len(uploaded_urls)} images successfully")
+        
+        # Create moodboard job
         moodboard = MoodBoard(
             id=uuid.uuid4(),
-            user_id=moodboard_data.user_id,
-            brand_name=moodboard_data.brand_name,
-            brand_slogan=moodboard_data.brand_slogan,
-            description=moodboard_data.description,
-            color_palette=moodboard_data.color_palette,
-            images=moodboard_data.images,
-            prompt=moodboard_data.prompt
+            user_id=None,  # Will be set by auth middleware if needed
+            brand_name=brand_name,
+            brand_slogan=brand_slogan,
+            description=description,
+            color_palette=color_palette_list,
+            images=uploaded_urls,  # List of uploaded URLs
+            prompt=prompt
         )
         
         db.add(moodboard)
         db.commit()
         db.refresh(moodboard)
         
-        logger.info(f"Created moodboard: {moodboard.id} with {len(moodboard_data.images or [])} images")
+        logger.info(f"Created moodboard job: {moodboard.id} with {len(uploaded_urls)} images")
         
-        return MoodBoardResponse.model_validate(moodboard)
+        return {
+            "moodboard_id": moodboard.id,
+            "status": "uploaded",
+            "brand_name": brand_name,
+            "image_count": len(uploaded_urls),
+            "image_urls": uploaded_urls,
+            "message": "Moodboard created successfully. Proceed to /moodboard/analyze/{moodboard_id} endpoint."
+        }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating moodboard: {e}", exc_info=True)
         raise HTTPException(
@@ -640,19 +704,51 @@ async def create_moodboard(
         )
 
 
-@router.get("/moodboard/{moodboard_id}", response_model=MoodBoardResponse)
-async def get_moodboard(
+@router.get("/moodboard/status/{moodboard_id}")
+async def get_moodboard_status(
     moodboard_id: uuid.UUID,
     db: Session = Depends(get_db)
 ):
-    """Get a specific moodboard by ID."""
+    """
+    Get comprehensive moodboard status and details.
+    
+    Returns complete information about the moodboard including
+    all images, brand information, and processing status.
+    """
     try:
         moodboard = db.query(MoodBoard).filter(MoodBoard.id == moodboard_id).first()
         
         if not moodboard:
             raise HTTPException(status_code=404, detail="Moodboard not found")
         
-        return MoodBoardResponse.model_validate(moodboard)
+        # Get all canvases for this moodboard
+        canvases = db.query(MoodBoardCanvas).filter(
+            MoodBoardCanvas.moodboard_id == moodboard_id
+        ).all()
+        
+        return {
+            "moodboard_id": moodboard.id,
+            "brand_name": moodboard.brand_name,
+            "brand_slogan": moodboard.brand_slogan,
+            "description": moodboard.description,
+            "color_palette": moodboard.color_palette,
+            "images": moodboard.images,
+            "prompt": moodboard.prompt,
+            "image_count": len(moodboard.images) if moodboard.images else 0,
+            "canvas_count": len(canvases),
+            "canvases": [
+                {
+                    "canvas_id": canvas.id,
+                    "name": canvas.name,
+                    "canvas_urls": canvas.canvas_urls,
+                    "is_favorite": canvas.is_favorite,
+                    "created_at": canvas.created_at
+                }
+                for canvas in canvases
+            ],
+            "created_at": moodboard.created_at,
+            "updated_at": moodboard.updated_at
+        }
         
     except HTTPException:
         raise
@@ -664,7 +760,7 @@ async def get_moodboard(
         )
 
 
-@router.post("/moodboard/{moodboard_id}/analyze", status_code=202)
+@router.post("/moodboard/analyze/{moodboard_id}", status_code=202)
 async def analyze_moodboard(
     moodboard_id: uuid.UUID,
     request: Request,
@@ -672,14 +768,14 @@ async def analyze_moodboard(
     db: Session = Depends(get_db)
 ):
     """
-    Analyze all images in a moodboard in parallel.
+    Step 2: Analyze all moodboard images in parallel.
     
     This endpoint:
     1. Retrieves all images from the moodboard
     2. Runs OCR, NLP, and Vision analysis on each image in parallel
     3. Combines all analyses with the brand color palette
-    4. Generates a comprehensive master prompt for each image
-    5. Returns a processing status
+    4. Generates NLP and Vision prompts for each image
+    5. Runs in background and returns immediately
     
     Images are processed in parallel but results maintain order.
     """
@@ -706,7 +802,7 @@ async def analyze_moodboard(
             "moodboard_id": moodboard_id,
             "status": "analyzing",
             "image_count": len(moodboard.images),
-            "message": f"Analysis started for {len(moodboard.images)} images. This will run in parallel."
+            "message": f"Analysis started for {len(moodboard.images)} images in parallel. Check /moodboard/status/{moodboard_id} for progress."
         }
         
     except HTTPException:
@@ -719,22 +815,24 @@ async def analyze_moodboard(
         )
 
 
-@router.post("/moodboard/{moodboard_id}/generate", status_code=200)
+@router.post("/moodboard/generate/{moodboard_id}", status_code=200)
 async def generate_moodboard_canvases(
     moodboard_id: uuid.UUID,
-    canvas_name: str = "Generated Canvas",
+    canvas_name: Annotated[str, Form()] = "Generated Canvas",
     db: Session = Depends(get_db)
 ):
     """
-    Generate enhanced canvas images for all moodboard images.
+    Step 3: Generate enhanced canvas images for all moodboard images.
     
     This endpoint:
-    1. Retrieves the moodboard with all analysis results
+    1. Retrieves the moodboard with all uploaded images
     2. For each image, generates an enhanced version using pollinations.ai
-    3. Maintains the order of images
-    4. Creates a MoodBoardCanvas with all generated URLs
+    3. Uploads generated images to storage in parallel
+    4. Maintains the order of images
+    5. Creates a MoodBoardCanvas with all generated URLs
     
     The generation happens in parallel but order is preserved.
+    Returns canvas_id for tracking the generated set.
     """
     try:
         # Get moodboard
@@ -745,7 +843,7 @@ async def generate_moodboard_canvases(
         if not moodboard.images or len(moodboard.images) == 0:
             raise HTTPException(status_code=400, detail="Moodboard has no images")
         
-        logger.info(f"Starting image generation for moodboard {moodboard_id}")
+        logger.info(f"Starting image generation for moodboard {moodboard_id} with {len(moodboard.images)} images")
         
         # Generate images in parallel while maintaining order
         canvas_urls = await generate_moodboard_images_parallel(
@@ -774,7 +872,17 @@ async def generate_moodboard_canvases(
         
         logger.info(f"Created canvas {canvas.id} with {len(canvas_urls)} generated images")
         
-        return MoodBoardCanvasResponse.model_validate(canvas)
+        return {
+            "moodboard_id": moodboard_id,
+            "canvas_id": canvas.id,
+            "status": "completed",
+            "canvas_name": canvas_name,
+            "canvas_urls": canvas_urls,
+            "image_count": len(canvas_urls),
+            "prompt": canvas.prompt,
+            "generation_params": canvas.generation_params,
+            "message": "Canvas generated successfully with all images in correct order."
+        }
         
     except HTTPException:
         raise
@@ -786,28 +894,70 @@ async def generate_moodboard_canvases(
         )
 
 
-@router.get("/moodboard/{moodboard_id}/canvases")
-async def get_moodboard_canvases(
-    moodboard_id: uuid.UUID,
-    db: Session = Depends(get_db)
-):
-    """Get all canvases for a specific moodboard."""
-    try:
-        canvases = db.query(MoodBoardCanvas).filter(
-            MoodBoardCanvas.moodboard_id == moodboard_id
-        ).all()
-        
-        return [MoodBoardCanvasResponse.model_validate(canvas) for canvas in canvases]
-        
-    except Exception as e:
-        logger.error(f"Error retrieving canvases: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to retrieve canvases: {str(e)}"
-        )
 
 
 # ============= Helper Functions for Moodboard Processing =============
+
+async def upload_single_moodboard_image(image_data: dict) -> dict:
+    """
+    Upload a single moodboard image to storage.
+    
+    Returns URL with index to maintain order.
+    """
+    try:
+        idx = image_data["index"]
+        logger.info(f"Uploading moodboard image #{idx}...")
+        
+        storage_service = StorageService()
+        image_url = storage_service.upload_file(
+            file_bytes=image_data["bytes"],
+            file_name=image_data["filename"],
+            content_type=image_data["content_type"]
+        )
+        
+        logger.info(f"Uploaded image #{idx}: {image_url[:50]}...")
+        
+        return {
+            "index": idx,
+            "url": image_url
+        }
+        
+    except Exception as e:
+        logger.error(f"Error uploading image #{image_data['index']}: {e}", exc_info=True)
+        raise
+
+
+async def upload_moodboard_images_parallel(image_data_list: list) -> list:
+    """
+    Upload multiple moodboard images in parallel.
+    
+    Maintains order of uploaded URLs.
+    """
+    import asyncio
+    
+    try:
+        logger.info(f"Starting parallel upload of {len(image_data_list)} images")
+        
+        # Create upload tasks for all images
+        tasks = [upload_single_moodboard_image(img_data) for img_data in image_data_list]
+        
+        # Run all uploads in parallel
+        results = await asyncio.gather(*tasks)
+        
+        # Sort by index to maintain order
+        results = sorted(results, key=lambda x: x["index"])
+        
+        # Extract URLs in correct order
+        urls = [result["url"] for result in results]
+        
+        logger.info(f"Successfully uploaded {len(urls)} images in parallel")
+        
+        return urls
+        
+    except Exception as e:
+        logger.error(f"Error in parallel image upload: {e}", exc_info=True)
+        raise
+
 
 async def analyze_single_moodboard_image(
     image_url: str,
@@ -832,9 +982,6 @@ async def analyze_single_moodboard_image(
         # Download image
         storage_service = StorageService()
         image_bytes = storage_service.download_file(image_url)
-        
-        # Run OCR
-        ocr_results = extract_text(ocr_reader, image_bytes)
         
         # Run NLP analysis if text found
         text_analysis = {}
